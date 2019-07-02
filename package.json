@@ -1,0 +1,10 @@
+{
+  "scripts": {
+    "start": "nodemon ../../../out/vs/server/main.js --watch ../../../out --verbose",
+    "watch": "cd ../../../ && yarn watch-client",
+    "build": "echo TODO && exit 1"
+  },
+  "devDependencies": {
+    "nodemon": "^1.19.1"
+  }
+}
