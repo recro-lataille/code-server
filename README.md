@@ -9,6 +9,7 @@
 ## Development
 - Clone VS Code.
 - Run `yarn` in the VS Code root directory.
+- Run `yarn compile` in the VS Code root directory.
 - Clone this repository to `src/vs/server` in the VS Code source.
 - Run `yarn` in this directory.
 - Run `yarn watch` in this directory.
