@@ -1,0 +1,895 @@
+diff --git a/src/vs/platform/extensionManagement/node/extensionGalleryIpc.ts b/src/vs/platform/extensionManagement/node/extensionGalleryIpc.ts
+new file mode 100644
+index 0000000000..ef1db87989
+--- /dev/null
++++ b/src/vs/platform/extensionManagement/node/extensionGalleryIpc.ts
+@@ -0,0 +1,96 @@
++import { IChannel, IServerChannel } from 'vs/base/parts/ipc/common/ipc';
++import { IGalleryExtension, IReportedExtension, IExtensionGalleryService, IQueryOptions, InstallOperation, StatisticType, IGalleryExtensionVersion, ITranslation } from 'vs/platform/extensionManagement/common/extensionManagement';
++import { Event } from 'vs/base/common/event';
++import { IExtensionManifest, IExtensionIdentifier } from 'vs/platform/extensions/common/extensions';
++import { IPager } from 'vs/base/common/paging';
++import { CancellationToken } from 'vs/base/common/cancellation';
++import { IProductService } from 'vs/platform/product/common/product';
++
++export class ExtensionGalleryChannel implements IServerChannel {
++
++	constructor(private service: IExtensionGalleryService) {}
++
++	listen(_: unknown, _event: string): Event<any> {
++		throw new Error('Invalid listen');
++	}
++
++	call(_: unknown, command: string, args?: any, cancellationToken?: CancellationToken): Promise<any> {
++		switch (command) {
++			case 'query': return args.length > 0 ? this.service.query(args[0], cancellationToken!) : this.service.query(cancellationToken!);
++			case 'download': return this.service.download(args[0], args[1]);
++			case 'reportStatistic': return this.service.reportStatistic(args[0], args[1], args[2], args[3]);
++			case 'getReadme': return this.service.getReadme(args[0], cancellationToken!);
++			case 'getManifest': return this.service.getManifest(args[0], cancellationToken!);
++			case 'getChangelog': return this.service.getChangelog(args[0], cancellationToken!);
++			case 'getCoreTranslation': return this.service.getCoreTranslation(args[0], args[1]);
++			case 'getAllVersions': return this.service.getAllVersions(args[0], args[1]);
++			case 'getExtensionsReport': return this.service.getExtensionsReport();
++			case 'getCompatibleExtension': return this.service.getCompatibleExtension(args[0], args[1]);
++		}
++
++		throw new Error(`Invalid call: ${command}`);
++	}
++}
++
++export class ExtensionGalleryChannelClient implements IExtensionGalleryService {
++
++	_serviceBrand: any;
++
++	private extensionsGalleryUrl: string | undefined;
++
++	constructor(
++		private readonly channel: IChannel,
++		productService: IProductService,
++	) {
++		const config = productService.extensionsGallery;
++		this.extensionsGalleryUrl = config && config.serviceUrl;
++	}
++
++	isEnabled(): boolean {
++		return !!this.extensionsGalleryUrl;
++	}
++
++	query(token: CancellationToken): Promise<IPager<IGalleryExtension>>;
++	query(options: IQueryOptions, token: CancellationToken): Promise<IPager<IGalleryExtension>>;
++	query(options: IQueryOptions | CancellationToken, token?: CancellationToken): Promise<IPager<IGalleryExtension>> {
++		return this.channel.call('query', CancellationToken.isCancellationToken(options) ? [] : [ options ], token);
++	}
++
++	download(extension: IGalleryExtension, operation: InstallOperation): Promise<string> {
++		return this.channel.call('download', [ extension, operation ]);
++	}
++
++	reportStatistic(publisher: string, name: string, version: string, type: StatisticType): Promise<void> {
++		return this.channel.call('reportStatistic', [ publisher, name, version, type ]);
++	}
++
++	getReadme(extension: IGalleryExtension, token: CancellationToken): Promise<string> {
++		return this.channel.call('getReadme', [ extension ], token);
++	}
++
++	getManifest(extension: IGalleryExtension, token: CancellationToken): Promise<IExtensionManifest | null> {
++		return this.channel.call('getManifest', [ extension ], token);
++	}
++
++	getChangelog(extension: IGalleryExtension, token: CancellationToken): Promise<string> {
++		return this.channel.call('getChangelog', [ extension ], token);
++	}
++
++	getCoreTranslation(extension: IGalleryExtension, languageId: string): Promise<ITranslation | null> {
++		return this.channel.call('getCoreTranslation', [ extension, languageId ]);
++	}
++
++	getAllVersions(extension: IGalleryExtension, compatible: boolean): Promise<IGalleryExtensionVersion[]> {
++		return this.channel.call('getAllVersions', [ extension, compatible ]);
++	}
++
++	getExtensionsReport(): Promise<IReportedExtension[]> {
++		return this.channel.call('getExtensionsReport');
++	}
++
++	getCompatibleExtension(extension: IGalleryExtension): Promise<IGalleryExtension | null>;
++	getCompatibleExtension(id: IExtensionIdentifier, version?: string): Promise<IGalleryExtension | null>;
++	getCompatibleExtension(id: IExtensionIdentifier | IGalleryExtension, version?: string): Promise<IGalleryExtension | null> {
++		return this.channel.call('getCompatibleExtension', [ id, version ]);
++	}
++}
+diff --git a/src/vs/workbench/browser/web.main.ts b/src/vs/workbench/browser/web.main.ts
+index 1986fb6642..7c66b644f2 100644
+--- a/src/vs/workbench/browser/web.main.ts
++++ b/src/vs/workbench/browser/web.main.ts
+@@ -115,6 +115,8 @@ class CodeRendererMain extends Disposable {
+ 			const remoteFileSystemProvider = this._register(new RemoteExtensionsFileSystemProvider(channel, remoteAgentService.getEnvironment()));
+ 
+ 			fileService.registerProvider(Schemas.vscodeRemote, remoteFileSystemProvider);
++			fileService.registerProvider(Schemas.http, remoteFileSystemProvider);
++			fileService.registerProvider(Schemas.https, remoteFileSystemProvider);
+ 		}
+ 
+ 		const payload = await this.resolveWorkspaceInitializationPayload();
+@@ -170,4 +172,4 @@ export function main(domElement: HTMLElement, options: IWorkbenchConstructionOpt
+ 	const renderer = new CodeRendererMain(domElement, options);
+ 
+ 	return renderer.open();
+-}
+\ No newline at end of file
++}
+diff --git a/src/vs/workbench/browser/web.simpleservices.ts b/src/vs/workbench/browser/web.simpleservices.ts
+index b253e573ae..2e4dfb393a 100644
+--- a/src/vs/workbench/browser/web.simpleservices.ts
++++ b/src/vs/workbench/browser/web.simpleservices.ts
+@@ -53,6 +53,10 @@ import { IConfigurationService } from 'vs/platform/configuration/common/configur
+ import { ParsedArgs } from 'vs/platform/environment/common/environment';
+ import { ClassifiedEvent, StrictPropertyCheck, GDPRClassification } from 'vs/platform/telemetry/common/gdprTypings';
+ import { IProcessEnvironment } from 'vs/base/common/platform';
++import { IRemoteAgentService } from 'vs/workbench/services/remote/common/remoteAgentService';
++import { ExtensionManagementChannelClient } from 'vs/platform/extensionManagement/node/extensionManagementIpc';
++import { ExtensionGalleryChannelClient } from "vs/platform/extensionManagement/node/extensionGalleryIpc";
++import { IProductService } from 'vs/platform/product/common/product';
+ 
+ //#region Backup File
+ 
+@@ -125,13 +129,11 @@ export class SimpleClipboardService implements IClipboardService {
+ 	writeText(text: string, type?: string): void { }
+ 
+ 	readText(type?: string): string {
+-		// @ts-ignore
+-		return undefined;
++		throw new Error('not implemented');
+ 	}
+ 
+ 	readFindText(): string {
+-		// @ts-ignore
+-		return undefined;
++		throw new Error('not implemented');
+ 	}
+ 
+ 	writeFindText(text: string): void { }
+@@ -239,7 +241,17 @@ export class SimpleExtensionGalleryService implements IExtensionGalleryService {
+ 	}
+ }
+ 
+-registerSingleton(IExtensionGalleryService, SimpleExtensionGalleryService, true);
++// registerSingleton(IExtensionGalleryService, SimpleExtensionGalleryService, true);
++
++class ExtensionGalleryService extends ExtensionGalleryChannelClient {
++	public constructor(
++		@IRemoteAgentService remoteAgentService: IRemoteAgentService,
++		@IProductService productService: IProductService,
++	) {
++		super(remoteAgentService.getConnection()!.getChannel('gallery'), productService);
++	}
++}
++registerSingleton(IExtensionGalleryService, ExtensionGalleryService, true);
+ 
+ //#endregion
+ 
+@@ -262,7 +274,7 @@ export class SimpleExtensionsWorkbenchService implements IExtensionsWorkbenchSer
+ 	checkForUpdates: any;
+ 	allowedBadgeProviders: string[];
+ }
+-registerSingleton(IExtensionsWorkbenchService, SimpleExtensionsWorkbenchService, true);
++// registerSingleton(IExtensionsWorkbenchService, SimpleExtensionsWorkbenchService, true);
+ //#endregion
+ 
+ //#region ICommentService
+@@ -375,7 +387,10 @@ export class SimpleExtensionTipsService implements IExtensionTipsService {
+ 	}
+ 
+ 	getAllIgnoredRecommendations(): { global: string[]; workspace: string[]; } {
+-		return Object.create(null);
++		return {
++			global: [],
++			workspace: [],
++		};
+ 	}
+ }
+ 
+@@ -436,7 +451,16 @@ export class SimpleExtensionManagementService implements IExtensionManagementSer
+ 	}
+ }
+ 
+-registerSingleton(IExtensionManagementService, SimpleExtensionManagementService);
++// registerSingleton(IExtensionManagementService, SimpleExtensionManagementService);
++
++class LocalExtensionManagementService extends ExtensionManagementChannelClient {
++	public constructor(
++		@IRemoteAgentService remoteAgentService: IRemoteAgentService,
++	) {
++		super(remoteAgentService.getConnection()!.getChannel('extensions'));
++	}
++}
++registerSingleton(IExtensionManagementService, LocalExtensionManagementService);
+ 
+ //#endregion
+ 
+@@ -1288,4 +1312,4 @@ class SimpleTunnelService implements ITunnelService {
+ 
+ registerSingleton(ITunnelService, SimpleTunnelService);
+ 
+-//#endregion
+\ No newline at end of file
++//#endregion
+diff --git a/src/vs/workbench/contrib/extensions/electron-browser/extensionEditor.ts b/src/vs/workbench/contrib/extensions/electron-browser/extensionEditor.ts
+index 86949eb39a..17373fb889 100644
+--- a/src/vs/workbench/contrib/extensions/electron-browser/extensionEditor.ts
++++ b/src/vs/workbench/contrib/extensions/electron-browser/extensionEditor.ts
+@@ -3,6 +3,7 @@
+  *  Licensed under the MIT License. See License.txt in the project root for license information.
+  *--------------------------------------------------------------------------------------------*/
+ 
++import * as process from 'vs/base/common/process';
+ import 'vs/css!./media/extensionEditor';
+ import { localize } from 'vs/nls';
+ import * as marked from 'vs/base/common/marked/marked';
+@@ -28,8 +29,8 @@ import { IExtensionsWorkbenchService, IExtensionsViewlet, VIEWLET_ID, IExtension
+ import { RatingsWidget, InstallCountWidget, RemoteBadgeWidget } from 'vs/workbench/contrib/extensions/electron-browser/extensionsWidgets';
+ import { EditorOptions } from 'vs/workbench/common/editor';
+ import { ActionBar } from 'vs/base/browser/ui/actionbar/actionbar';
+-import { CombinedInstallAction, UpdateAction, ExtensionEditorDropDownAction, ReloadAction, MaliciousStatusLabelAction, IgnoreExtensionRecommendationAction, UndoIgnoreExtensionRecommendationAction, EnableDropDownAction, DisableDropDownAction, StatusLabelAction, SetFileIconThemeAction, SetColorThemeAction, RemoteInstallAction, DisabledLabelAction, SystemDisabledWarningAction, LocalInstallAction } from 'vs/workbench/contrib/extensions/electron-browser/extensionsActions';
+-import { WebviewElement } from 'vs/workbench/contrib/webview/electron-browser/webviewElement';
++import { CombinedInstallAction, UpdateAction, ExtensionEditorDropDownAction, ReloadAction, MaliciousStatusLabelAction, IgnoreExtensionRecommendationAction, UndoIgnoreExtensionRecommendationAction, EnableDropDownAction, DisableDropDownAction, StatusLabelAction, SetFileIconThemeAction, SetColorThemeAction, /*RemoteInstallAction, */DisabledLabelAction, SystemDisabledWarningAction, LocalInstallAction } from 'vs/workbench/contrib/extensions/electron-browser/extensionsActions';
++import { IFrameWebview as WebviewElement } from 'vs/workbench/contrib/webview/browser/webviewElement';
+ import { IKeybindingService } from 'vs/platform/keybinding/common/keybinding';
+ import { DomScrollableElement } from 'vs/base/browser/ui/scrollbar/scrollableElement';
+ import { IOpenerService } from 'vs/platform/opener/common/opener';
+@@ -44,7 +45,7 @@ import { assign } from 'vs/base/common/objects';
+ import { INotificationService } from 'vs/platform/notification/common/notification';
+ import { CancellationToken } from 'vs/base/common/cancellation';
+ import { ExtensionsTree, ExtensionData } from 'vs/workbench/contrib/extensions/browser/extensionsViewer';
+-import { ShowCurrentReleaseNotesAction } from 'vs/workbench/contrib/update/electron-browser/update';
++// import { ShowCurrentReleaseNotesAction } from 'vs/workbench/contrib/update/electron-browser/update';
+ import { KeybindingParser } from 'vs/base/common/keybindingParser';
+ import { IStorageService } from 'vs/platform/storage/common/storage';
+ import { IExtensionService } from 'vs/workbench/services/extensions/common/extensions';
+@@ -54,12 +55,12 @@ import { IWorkbenchThemeService } from 'vs/workbench/services/themes/common/work
+ import { URI } from 'vs/base/common/uri';
+ 
+ function renderBody(body: string): string {
+-	const styleSheetPath = require.toUrl('./media/markdown.css').replace('file://', 'vscode-resource://');
++	const styleSheetPath = require.toUrl('./media/markdown.css');
+ 	return `<!DOCTYPE html>
+ 		<html>
+ 			<head>
+ 				<meta http-equiv="Content-type" content="text/html;charset=UTF-8">
+-				<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; media-src https:; script-src 'none'; style-src vscode-resource:; child-src 'none'; frame-src 'none';">
++				<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; media-src https:; script-src 'none'; style-src ${styleSheetPath}; child-src 'none'; frame-src 'none';">
+ 				<link rel="stylesheet" type="text/css" href="${styleSheetPath}">
+ 			</head>
+ 			<body>
+@@ -370,7 +371,7 @@ export class ExtensionEditor extends BaseEditor {
+ 			this.instantiationService.createInstance(SetFileIconThemeAction, fileIconThemes),
+ 			this.instantiationService.createInstance(EnableDropDownAction),
+ 			this.instantiationService.createInstance(DisableDropDownAction, runningExtensions),
+-			this.instantiationService.createInstance(RemoteInstallAction),
++			// this.instantiationService.createInstance(RemoteInstallAction),
+ 			this.instantiationService.createInstance(LocalInstallAction),
+ 			combinedInstallAction,
+ 			systemDisabledWarningAction,
+@@ -556,7 +557,7 @@ export class ExtensionEditor extends BaseEditor {
+ 						return;
+ 					}
+ 					// Whitelist supported schemes for links
+-					if (['http', 'https', 'mailto'].indexOf(link.scheme) >= 0 || (link.scheme === 'command' && link.path === ShowCurrentReleaseNotesAction.ID)) {
++					if (['http', 'https', 'mailto'].indexOf(link.scheme) >= 0 /*|| (link.scheme === 'command' && link.path === ShowCurrentReleaseNotesAction.ID)*/) {
+ 						this.openerService.open(link);
+ 					}
+ 				}, null, this.contentDisposables));
+diff --git a/src/vs/workbench/contrib/extensions/electron-browser/extensions.contribution.ts b/src/vs/workbench/contrib/extensions/electron-browser/extensions.contribution.ts
+index aa632ac96e..b6d016f928 100644
+--- a/src/vs/workbench/contrib/extensions/electron-browser/extensions.contribution.ts
++++ b/src/vs/workbench/contrib/extensions/electron-browser/extensions.contribution.ts
+@@ -9,10 +9,10 @@ import { KeyMod, KeyChord, KeyCode } from 'vs/base/common/keyCodes';
+ import { Registry } from 'vs/platform/registry/common/platform';
+ import { SyncActionDescriptor, MenuRegistry, MenuId } from 'vs/platform/actions/common/actions';
+ import { registerSingleton } from 'vs/platform/instantiation/common/extensions';
+-import { IExtensionTipsService, ExtensionsLabel, ExtensionsChannelId, PreferencesLabel, IExtensionManagementService, IExtensionGalleryService } from 'vs/platform/extensionManagement/common/extensionManagement';
++import { /*IExtensionTipsService, */ExtensionsLabel, ExtensionsChannelId, PreferencesLabel, IExtensionManagementService, IExtensionGalleryService } from 'vs/platform/extensionManagement/common/extensionManagement';
+ 
+ import { IWorkbenchActionRegistry, Extensions as WorkbenchActionExtensions } from 'vs/workbench/common/actions';
+-import { ExtensionTipsService } from 'vs/workbench/contrib/extensions/electron-browser/extensionTipsService';
++// import { ExtensionTipsService } from 'vs/workbench/contrib/extensions/electron-browser/extensionTipsService';
+ import { IWorkbenchContributionsRegistry, Extensions as WorkbenchExtensions } from 'vs/workbench/common/contributions';
+ import { IOutputChannelRegistry, Extensions as OutputExtensions } from 'vs/workbench/contrib/output/common/output';
+ import { SyncDescriptor } from 'vs/platform/instantiation/common/descriptors';
+@@ -38,14 +38,14 @@ import { areSameExtensions } from 'vs/platform/extensionManagement/common/extens
+ import { GalleryExtensionsHandler, ExtensionsHandler } from 'vs/workbench/contrib/extensions/browser/extensionsQuickOpen';
+ import { EditorDescriptor, IEditorRegistry, Extensions as EditorExtensions } from 'vs/workbench/browser/editor';
+ import { LifecyclePhase } from 'vs/platform/lifecycle/common/lifecycle';
+-import { RuntimeExtensionsEditor, ShowRuntimeExtensionsAction, IExtensionHostProfileService, DebugExtensionHostAction, StartExtensionHostProfileAction, StopExtensionHostProfileAction, CONTEXT_PROFILE_SESSION_STATE, SaveExtensionHostProfileAction, CONTEXT_EXTENSION_HOST_PROFILE_RECORDED } from 'vs/workbench/contrib/extensions/electron-browser/runtimeExtensionsEditor';
+-import { EditorInput, IEditorInputFactory, IEditorInputFactoryRegistry, Extensions as EditorInputExtensions, ActiveEditorContext } from 'vs/workbench/common/editor';
+-import { ExtensionHostProfileService } from 'vs/workbench/contrib/extensions/electron-browser/extensionProfileService';
++// import { RuntimeExtensionsEditor, ShowRuntimeExtensionsAction, IExtensionHostProfileService, DebugExtensionHostAction, StartExtensionHostProfileAction, StopExtensionHostProfileAction, CONTEXT_PROFILE_SESSION_STATE, SaveExtensionHostProfileAction, CONTEXT_EXTENSION_HOST_PROFILE_RECORDED } from 'vs/workbench/contrib/extensions/electron-browser/runtimeExtensionsEditor';
++import { EditorInput, IEditorInputFactory, IEditorInputFactoryRegistry, Extensions as EditorInputExtensions/*, ActiveEditorContext*/ } from 'vs/workbench/common/editor';
++// import { ExtensionHostProfileService } from 'vs/workbench/contrib/extensions/electron-browser/extensionProfileService';
+ import { RuntimeExtensionsInput } from 'vs/workbench/contrib/extensions/electron-browser/runtimeExtensionsInput';
+ import { URI, UriComponents } from 'vs/base/common/uri';
+-import { ContextKeyExpr } from 'vs/platform/contextkey/common/contextkey';
++// import { ContextKeyExpr } from 'vs/platform/contextkey/common/contextkey';
+ import { ExtensionActivationProgress } from 'vs/workbench/contrib/extensions/browser/extensionsActivationProgress';
+-import { ExtensionsAutoProfiler } from 'vs/workbench/contrib/extensions/electron-browser/extensionsAutoProfiler';
++// import { ExtensionsAutoProfiler } from 'vs/workbench/contrib/extensions/electron-browser/extensionsAutoProfiler';
+ import { onUnexpectedError } from 'vs/base/common/errors';
+ import { ExtensionDependencyChecker } from 'vs/workbench/contrib/extensions/electron-browser/extensionsDependencyChecker';
+ import { CancellationToken } from 'vs/base/common/cancellation';
+@@ -53,8 +53,8 @@ import { ExtensionType } from 'vs/platform/extensions/common/extensions';
+ 
+ // Singletons
+ registerSingleton(IExtensionsWorkbenchService, ExtensionsWorkbenchService);
+-registerSingleton(IExtensionTipsService, ExtensionTipsService);
+-registerSingleton(IExtensionHostProfileService, ExtensionHostProfileService, true);
++// registerSingleton(IExtensionTipsService, ExtensionTipsService);
++// registerSingleton(IExtensionHostProfileService, ExtensionHostProfileService, true);
+ 
+ const workbenchRegistry = Registry.as<IWorkbenchContributionsRegistry>(WorkbenchExtensions.Workbench);
+ workbenchRegistry.registerWorkbenchContribution(StatusUpdater, LifecyclePhase.Restored);
+@@ -63,7 +63,7 @@ workbenchRegistry.registerWorkbenchContribution(ConfigureRecommendedExtensionsCo
+ workbenchRegistry.registerWorkbenchContribution(KeymapExtensions, LifecyclePhase.Restored);
+ workbenchRegistry.registerWorkbenchContribution(ExtensionsViewletViewsContribution, LifecyclePhase.Starting);
+ workbenchRegistry.registerWorkbenchContribution(ExtensionActivationProgress, LifecyclePhase.Eventually);
+-workbenchRegistry.registerWorkbenchContribution(ExtensionsAutoProfiler, LifecyclePhase.Eventually);
++// workbenchRegistry.registerWorkbenchContribution(ExtensionsAutoProfiler, LifecyclePhase.Eventually);
+ workbenchRegistry.registerWorkbenchContribution(ExtensionDependencyChecker, LifecyclePhase.Eventually);
+ 
+ Registry.as<IOutputChannelRegistry>(OutputExtensions.OutputChannels)
+@@ -104,14 +104,14 @@ Registry.as<IEditorRegistry>(EditorExtensions.Editors)
+ 
+ // Running Extensions Editor
+ 
+-const runtimeExtensionsEditorDescriptor = new EditorDescriptor(
+-	RuntimeExtensionsEditor,
+-	RuntimeExtensionsEditor.ID,
+-	localize('runtimeExtension', "Running Extensions")
+-);
++// const runtimeExtensionsEditorDescriptor = new EditorDescriptor(
++// 	RuntimeExtensionsEditor,
++// 	RuntimeExtensionsEditor.ID,
++// 	localize('runtimeExtension', "Running Extensions")
++// );
+ 
+-Registry.as<IEditorRegistry>(EditorExtensions.Editors)
+-	.registerEditor(runtimeExtensionsEditorDescriptor, [new SyncDescriptor(RuntimeExtensionsInput)]);
++// Registry.as<IEditorRegistry>(EditorExtensions.Editors)
++// 	.registerEditor(runtimeExtensionsEditorDescriptor, [new SyncDescriptor(RuntimeExtensionsInput)]);
+ 
+ class RuntimeExtensionsInputFactory implements IEditorInputFactory {
+ 	serialize(editorInput: EditorInput): string {
+@@ -203,7 +203,7 @@ actionRegistry.registerWorkbenchAction(checkForUpdatesAction, `Extensions: Check
+ actionRegistry.registerWorkbenchAction(new SyncActionDescriptor(EnableAutoUpdateAction, EnableAutoUpdateAction.ID, EnableAutoUpdateAction.LABEL), `Extensions: Enable Auto Updating Extensions`, ExtensionsLabel);
+ actionRegistry.registerWorkbenchAction(new SyncActionDescriptor(DisableAutoUpdateAction, DisableAutoUpdateAction.ID, DisableAutoUpdateAction.LABEL), `Extensions: Disable Auto Updating Extensions`, ExtensionsLabel);
+ actionRegistry.registerWorkbenchAction(new SyncActionDescriptor(InstallSpecificVersionOfExtensionAction, InstallSpecificVersionOfExtensionAction.ID, InstallSpecificVersionOfExtensionAction.LABEL), 'Install Specific Version of Extension...', ExtensionsLabel);
+-actionRegistry.registerWorkbenchAction(new SyncActionDescriptor(ShowRuntimeExtensionsAction, ShowRuntimeExtensionsAction.ID, ShowRuntimeExtensionsAction.LABEL), 'Show Running Extensions', localize('developer', "Developer"));
++// actionRegistry.registerWorkbenchAction(new SyncActionDescriptor(ShowRuntimeExtensionsAction, ShowRuntimeExtensionsAction.ID, ShowRuntimeExtensionsAction.LABEL), 'Show Running Extensions', localize('developer', "Developer"));
+ actionRegistry.registerWorkbenchAction(new SyncActionDescriptor(ReinstallAction, ReinstallAction.ID, ReinstallAction.LABEL), 'Reinstall Extension...', localize('developer', "Developer"));
+ 
+ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration)
+@@ -270,25 +270,25 @@ CommandsRegistry.registerCommand('extension.open', (accessor: ServicesAccessor,
+ 	});
+ });
+ 
+-CommandsRegistry.registerCommand(DebugExtensionHostAction.ID, (accessor: ServicesAccessor) => {
+-	const instantiationService = accessor.get(IInstantiationService);
+-	instantiationService.createInstance(DebugExtensionHostAction).run();
+-});
++// CommandsRegistry.registerCommand(DebugExtensionHostAction.ID, (accessor: ServicesAccessor) => {
++// 	const instantiationService = accessor.get(IInstantiationService);
++// 	instantiationService.createInstance(DebugExtensionHostAction).run();
++// });
+ 
+-CommandsRegistry.registerCommand(StartExtensionHostProfileAction.ID, (accessor: ServicesAccessor) => {
+-	const instantiationService = accessor.get(IInstantiationService);
+-	instantiationService.createInstance(StartExtensionHostProfileAction, StartExtensionHostProfileAction.ID, StartExtensionHostProfileAction.LABEL).run();
+-});
++// CommandsRegistry.registerCommand(StartExtensionHostProfileAction.ID, (accessor: ServicesAccessor) => {
++// 	const instantiationService = accessor.get(IInstantiationService);
++// 	instantiationService.createInstance(StartExtensionHostProfileAction, StartExtensionHostProfileAction.ID, StartExtensionHostProfileAction.LABEL).run();
++// });
+ 
+-CommandsRegistry.registerCommand(StopExtensionHostProfileAction.ID, (accessor: ServicesAccessor) => {
+-	const instantiationService = accessor.get(IInstantiationService);
+-	instantiationService.createInstance(StopExtensionHostProfileAction, StopExtensionHostProfileAction.ID, StopExtensionHostProfileAction.LABEL).run();
+-});
++// CommandsRegistry.registerCommand(StopExtensionHostProfileAction.ID, (accessor: ServicesAccessor) => {
++// 	const instantiationService = accessor.get(IInstantiationService);
++// 	instantiationService.createInstance(StopExtensionHostProfileAction, StopExtensionHostProfileAction.ID, StopExtensionHostProfileAction.LABEL).run();
++// });
+ 
+-CommandsRegistry.registerCommand(SaveExtensionHostProfileAction.ID, (accessor: ServicesAccessor) => {
+-	const instantiationService = accessor.get(IInstantiationService);
+-	instantiationService.createInstance(SaveExtensionHostProfileAction, SaveExtensionHostProfileAction.ID, SaveExtensionHostProfileAction.LABEL).run();
+-});
++// CommandsRegistry.registerCommand(SaveExtensionHostProfileAction.ID, (accessor: ServicesAccessor) => {
++// 	const instantiationService = accessor.get(IInstantiationService);
++// 	instantiationService.createInstance(SaveExtensionHostProfileAction, SaveExtensionHostProfileAction.ID, SaveExtensionHostProfileAction.LABEL).run();
++// });
+ 
+ // File menu registration
+ 
+@@ -332,58 +332,58 @@ MenuRegistry.appendMenuItem(MenuId.MenubarViewMenu, {
+ 
+ // Running extensions
+ 
+-MenuRegistry.appendMenuItem(MenuId.EditorTitle, {
+-	command: {
+-		id: DebugExtensionHostAction.ID,
+-		title: DebugExtensionHostAction.LABEL,
+-		iconLocation: {
+-			dark: URI.parse(require.toUrl(`vs/workbench/contrib/extensions/electron-browser/media/start-inverse.svg`)),
+-			light: URI.parse(require.toUrl(`vs/workbench/contrib/extensions/electron-browser/media/start.svg`)),
+-		}
+-	},
+-	group: 'navigation',
+-	when: ActiveEditorContext.isEqualTo(RuntimeExtensionsEditor.ID)
+-});
+-
+-MenuRegistry.appendMenuItem(MenuId.EditorTitle, {
+-	command: {
+-		id: StartExtensionHostProfileAction.ID,
+-		title: StartExtensionHostProfileAction.LABEL,
+-		iconLocation: {
+-			dark: URI.parse(require.toUrl(`vs/workbench/contrib/extensions/electron-browser/media/profile-start-inverse.svg`)),
+-			light: URI.parse(require.toUrl(`vs/workbench/contrib/extensions/electron-browser/media/profile-start.svg`)),
+-		}
+-	},
+-	group: 'navigation',
+-	when: ContextKeyExpr.and(ActiveEditorContext.isEqualTo(RuntimeExtensionsEditor.ID), CONTEXT_PROFILE_SESSION_STATE.notEqualsTo('running'))
+-});
+-
+-MenuRegistry.appendMenuItem(MenuId.EditorTitle, {
+-	command: {
+-		id: StopExtensionHostProfileAction.ID,
+-		title: StopExtensionHostProfileAction.LABEL,
+-		iconLocation: {
+-			dark: URI.parse(require.toUrl(`vs/workbench/contrib/extensions/electron-browser/media/profile-stop-inverse.svg`)),
+-			light: URI.parse(require.toUrl(`vs/workbench/contrib/extensions/electron-browser/media/profile-stop.svg`)),
+-		}
+-	},
+-	group: 'navigation',
+-	when: ContextKeyExpr.and(ActiveEditorContext.isEqualTo(RuntimeExtensionsEditor.ID), CONTEXT_PROFILE_SESSION_STATE.isEqualTo('running'))
+-});
+-
+-MenuRegistry.appendMenuItem(MenuId.EditorTitle, {
+-	command: {
+-		id: SaveExtensionHostProfileAction.ID,
+-		title: SaveExtensionHostProfileAction.LABEL,
+-		iconLocation: {
+-			dark: URI.parse(require.toUrl(`vs/workbench/contrib/extensions/electron-browser/media/save-inverse.svg`)),
+-			light: URI.parse(require.toUrl(`vs/workbench/contrib/extensions/electron-browser/media/save.svg`)),
+-		},
+-		precondition: CONTEXT_EXTENSION_HOST_PROFILE_RECORDED
+-	},
+-	group: 'navigation',
+-	when: ContextKeyExpr.and(ActiveEditorContext.isEqualTo(RuntimeExtensionsEditor.ID))
+-});
++// MenuRegistry.appendMenuItem(MenuId.EditorTitle, {
++// 	command: {
++// 		id: DebugExtensionHostAction.ID,
++// 		title: DebugExtensionHostAction.LABEL,
++// 		iconLocation: {
++// 			dark: URI.parse(require.toUrl(`vs/workbench/contrib/extensions/browser/media/start-inverse.svg`)),
++// 			light: URI.parse(require.toUrl(`vs/workbench/contrib/extensions/browser/media/start.svg`)),
++// 		}
++// 	},
++// 	group: 'navigation',
++// 	when: ActiveEditorContext.isEqualTo(RuntimeExtensionsEditor.ID)
++// });
++
++// MenuRegistry.appendMenuItem(MenuId.EditorTitle, {
++// 	command: {
++// 		id: StartExtensionHostProfileAction.ID,
++// 		title: StartExtensionHostProfileAction.LABEL,
++// 		iconLocation: {
++// 			dark: URI.parse(require.toUrl(`vs/workbench/contrib/extensions/browser/media/profile-start-inverse.svg`)),
++// 			light: URI.parse(require.toUrl(`vs/workbench/contrib/extensions/browser/media/profile-start.svg`)),
++// 		}
++// 	},
++// 	group: 'navigation',
++// 	when: ContextKeyExpr.and(ActiveEditorContext.isEqualTo(RuntimeExtensionsEditor.ID), CONTEXT_PROFILE_SESSION_STATE.notEqualsTo('running'))
++// });
++
++// MenuRegistry.appendMenuItem(MenuId.EditorTitle, {
++// 	command: {
++// 		id: StopExtensionHostProfileAction.ID,
++// 		title: StopExtensionHostProfileAction.LABEL,
++// 		iconLocation: {
++// 			dark: URI.parse(require.toUrl(`vs/workbench/contrib/extensions/browser/media/profile-stop-inverse.svg`)),
++// 			light: URI.parse(require.toUrl(`vs/workbench/contrib/extensions/browser/media/profile-stop.svg`)),
++// 		}
++// 	},
++// 	group: 'navigation',
++// 	when: ContextKeyExpr.and(ActiveEditorContext.isEqualTo(RuntimeExtensionsEditor.ID), CONTEXT_PROFILE_SESSION_STATE.isEqualTo('running'))
++// });
++
++// MenuRegistry.appendMenuItem(MenuId.EditorTitle, {
++// 	command: {
++// 		id: SaveExtensionHostProfileAction.ID,
++// 		title: SaveExtensionHostProfileAction.LABEL,
++// 		iconLocation: {
++// 			dark: URI.parse(require.toUrl(`vs/workbench/contrib/extensions/browser/media/save-inverse.svg`)),
++// 			light: URI.parse(require.toUrl(`vs/workbench/contrib/extensions/browser/media/save.svg`)),
++// 		},
++// 		precondition: CONTEXT_EXTENSION_HOST_PROFILE_RECORDED
++// 	},
++// 	group: 'navigation',
++// 	when: ContextKeyExpr.and(ActiveEditorContext.isEqualTo(RuntimeExtensionsEditor.ID))
++// });
+ 
+ CommandsRegistry.registerCommand({
+ 	id: 'workbench.extensions.installExtension',
+@@ -457,4 +457,4 @@ MenuRegistry.appendMenuItem(MenuId.GlobalActivity, {
+ 		title: localize('showExtensions', "Extensions")
+ 	},
+ 	order: 3
+-});
+\ No newline at end of file
++});
+diff --git a/src/vs/workbench/contrib/extensions/electron-browser/extensionsList.ts b/src/vs/workbench/contrib/extensions/electron-browser/extensionsList.ts
+index 3f6427704d..f511aed474 100644
+--- a/src/vs/workbench/contrib/extensions/electron-browser/extensionsList.ts
++++ b/src/vs/workbench/contrib/extensions/electron-browser/extensionsList.ts
+@@ -13,7 +13,7 @@ import { IPagedRenderer } from 'vs/base/browser/ui/list/listPaging';
+ import { Event } from 'vs/base/common/event';
+ import { domEvent } from 'vs/base/browser/event';
+ import { IExtension, ExtensionContainers, ExtensionState, IExtensionsWorkbenchService } from 'vs/workbench/contrib/extensions/common/extensions';
+-import { InstallAction, UpdateAction, ManageExtensionAction, ReloadAction, MaliciousStatusLabelAction, ExtensionActionViewItem, StatusLabelAction, RemoteInstallAction, SystemDisabledWarningAction, DisabledLabelAction, LocalInstallAction } from 'vs/workbench/contrib/extensions/electron-browser/extensionsActions';
++import { InstallAction, UpdateAction, ManageExtensionAction, ReloadAction, MaliciousStatusLabelAction, ExtensionActionViewItem, StatusLabelAction, /*RemoteInstallAction, */SystemDisabledWarningAction, DisabledLabelAction, LocalInstallAction } from 'vs/workbench/contrib/extensions/electron-browser/extensionsActions';
+ import { areSameExtensions } from 'vs/platform/extensionManagement/common/extensionManagementUtil';
+ import { Label, RatingsWidget, InstallCountWidget, RecommendationWidget, RemoteBadgeWidget, TooltipWidget } from 'vs/workbench/contrib/extensions/electron-browser/extensionsWidgets';
+ import { IExtensionService } from 'vs/workbench/services/extensions/common/extensions';
+@@ -96,7 +96,7 @@ export class Renderer implements IPagedRenderer<IExtension, ITemplateData> {
+ 			this.instantiationService.createInstance(UpdateAction),
+ 			reloadAction,
+ 			this.instantiationService.createInstance(InstallAction),
+-			this.instantiationService.createInstance(RemoteInstallAction),
++			// this.instantiationService.createInstance(RemoteInstallAction),
+ 			this.instantiationService.createInstance(LocalInstallAction),
+ 			this.instantiationService.createInstance(MaliciousStatusLabelAction, false),
+ 			systemDisabledWarningAction,
+diff --git a/src/vs/workbench/contrib/extensions/electron-browser/extensionsViews.ts b/src/vs/workbench/contrib/extensions/electron-browser/extensionsViews.ts
+index 6dad2fb580..4ed25dd206 100644
+--- a/src/vs/workbench/contrib/extensions/electron-browser/extensionsViews.ts
++++ b/src/vs/workbench/contrib/extensions/electron-browser/extensionsViews.ts
+@@ -34,7 +34,7 @@ import { INotificationService, Severity } from 'vs/platform/notification/common/
+ import { ViewletPanel, IViewletPanelOptions } from 'vs/workbench/browser/parts/views/panelViewlet';
+ import { IWorkspaceContextService } from 'vs/platform/workspace/common/workspace';
+ import { distinct, coalesce } from 'vs/base/common/arrays';
+-import { IExperimentService, IExperiment, ExperimentActionType } from 'vs/workbench/contrib/experiments/electron-browser/experimentService';
++// import { IExperimentService, IExperiment, ExperimentActionType } from 'vs/workbench/contrib/experiments/electron-browser/experimentService';
+ import { alert } from 'vs/base/browser/ui/aria/aria';
+ import { IListContextMenuEvent } from 'vs/base/browser/ui/list/list';
+ import { createErrorWithActions } from 'vs/base/common/errorsWithActions';
+@@ -96,7 +96,7 @@ export class ExtensionsListView extends ViewletPanel {
+ 		@ITelemetryService private readonly telemetryService: ITelemetryService,
+ 		@IConfigurationService configurationService: IConfigurationService,
+ 		@IWorkspaceContextService protected contextService: IWorkspaceContextService,
+-		@IExperimentService private readonly experimentService: IExperimentService,
++		// @IExperimentService private readonly experimentService: IExperimentService,
+ 		@IWorkbenchThemeService private readonly workbenchThemeService: IWorkbenchThemeService,
+ 		@IExtensionManagementServerService protected readonly extensionManagementServerService: IExtensionManagementServerService,
+ 		@IProductService protected readonly productService: IProductService,
+@@ -448,14 +448,14 @@ export class ExtensionsListView extends ViewletPanel {
+ 		if (text) {
+ 			options = assign(options, { text: text.substr(0, 350), source: 'searchText' });
+ 			if (!hasUserDefinedSortOrder) {
+-				const searchExperiments = await this.getSearchExperiments();
+-				for (const experiment of searchExperiments) {
+-					if (experiment.action && text.toLowerCase() === experiment.action.properties['searchText'] && Array.isArray(experiment.action.properties['preferredResults'])) {
+-						preferredResults = experiment.action.properties['preferredResults'];
+-						options.source += `-experiment-${experiment.id}`;
+-						break;
+-					}
+-				}
++				// const searchExperiments = await this.getSearchExperiments();
++				// for (const experiment of searchExperiments) {
++				// 	if (experiment.action && text.toLowerCase() === experiment.action.properties['searchText'] && Array.isArray(experiment.action.properties['preferredResults'])) {
++				// 		preferredResults = experiment.action.properties['preferredResults'];
++				// 		options.source += `-experiment-${experiment.id}`;
++				// 		break;
++				// 	}
++				// }
+ 			}
+ 		} else {
+ 			options.source = 'viewlet';
+@@ -480,13 +480,13 @@ export class ExtensionsListView extends ViewletPanel {
+ 
+ 	}
+ 
+-	private _searchExperiments: Promise<IExperiment[]>;
+-	private getSearchExperiments(): Promise<IExperiment[]> {
+-		if (!this._searchExperiments) {
+-			this._searchExperiments = this.experimentService.getExperimentsByType(ExperimentActionType.ExtensionSearchResults);
+-		}
+-		return this._searchExperiments;
+-	}
++	// private _searchExperiments: Promise<IExperiment[]>;
++	// private getSearchExperiments(): Promise<IExperiment[]> {
++	// 	if (!this._searchExperiments) {
++	// 		this._searchExperiments = this.experimentService.getExperimentsByType(ExperimentActionType.ExtensionSearchResults);
++	// 	}
++	// 	return this._searchExperiments;
++	// }
+ 
+ 	private sortExtensions(extensions: IExtension[], options: IQueryOptions): IExtension[] {
+ 		switch (options.sortBy) {
+@@ -551,14 +551,14 @@ export class ExtensionsListView extends ViewletPanel {
+ 	}
+ 
+ 	private async getCuratedModel(query: Query, options: IQueryOptions, token: CancellationToken): Promise<IPagedModel<IExtension>> {
+-		const value = query.value.replace(/curated:/g, '').trim();
+-		const names = await this.experimentService.getCuratedExtensionsList(value);
+-		if (Array.isArray(names) && names.length) {
+-			options.source = `curated:${value}`;
+-			const pager = await this.extensionsWorkbenchService.queryGallery(assign(options, { names, pageSize: names.length }), token);
+-			this.sortFirstPage(pager, names);
+-			return this.getPagedModel(pager || []);
+-		}
++		// const value = query.value.replace(/curated:/g, '').trim();
++		// const names = await this.experimentService.getCuratedExtensionsList(value);
++		// if (Array.isArray(names) && names.length) {
++		// 	options.source = `curated:${value}`;
++		// 	const pager = await this.extensionsWorkbenchService.queryGallery(assign(options, { names, pageSize: names.length }), token);
++		// 	this.sortFirstPage(pager, names);
++		// 	return this.getPagedModel(pager || []);
++		// }
+ 		return new PagedModel([]);
+ 	}
+ 
+@@ -843,14 +843,14 @@ export class ServerExtensionsView extends ExtensionsListView {
+ 		@ITelemetryService telemetryService: ITelemetryService,
+ 		@IConfigurationService configurationService: IConfigurationService,
+ 		@IWorkspaceContextService contextService: IWorkspaceContextService,
+-		@IExperimentService experimentService: IExperimentService,
++		// @IExperimentService experimentService: IExperimentService,
+ 		@IWorkbenchThemeService workbenchThemeService: IWorkbenchThemeService,
+ 		@IExtensionsWorkbenchService extensionsWorkbenchService: IExtensionsWorkbenchService,
+ 		@IExtensionManagementServerService extensionManagementServerService: IExtensionManagementServerService,
+ 		@IProductService productService: IProductService,
+ 	) {
+ 		options.server = server;
+-		super(options, notificationService, keybindingService, contextMenuService, instantiationService, themeService, extensionService, extensionsWorkbenchService, editorService, tipsService, telemetryService, configurationService, contextService, experimentService, workbenchThemeService, extensionManagementServerService, productService);
++		super(options, notificationService, keybindingService, contextMenuService, instantiationService, themeService, extensionService, extensionsWorkbenchService, editorService, tipsService, telemetryService, configurationService, contextService, /*experimentService,*/ workbenchThemeService, extensionManagementServerService, productService);
+ 		this._register(onDidChangeTitle(title => this.updateTitle(title)));
+ 	}
+ 
+diff --git a/src/vs/workbench/contrib/extensions/node/extensionsWorkbenchService.ts b/src/vs/workbench/contrib/extensions/node/extensionsWorkbenchService.ts
+index c08a6e37c1..31640d7e66 100644
+--- a/src/vs/workbench/contrib/extensions/node/extensionsWorkbenchService.ts
++++ b/src/vs/workbench/contrib/extensions/node/extensionsWorkbenchService.ts
+@@ -4,7 +4,7 @@
+  *--------------------------------------------------------------------------------------------*/
+ 
+ import * as nls from 'vs/nls';
+-import * as semver from 'semver';
++// import * as semver from 'semver';
+ import { Event, Emitter } from 'vs/base/common/event';
+ import { index, distinct } from 'vs/base/common/arrays';
+ import { ThrottledDelayer } from 'vs/base/common/async';
+@@ -26,7 +26,8 @@ import { IExtension, ExtensionState, IExtensionsWorkbenchService, AutoUpdateConf
+ import { IEditorService, SIDE_GROUP, ACTIVE_GROUP } from 'vs/workbench/services/editor/common/editorService';
+ import { IURLService, IURLHandler } from 'vs/platform/url/common/url';
+ import { ExtensionsInput } from 'vs/workbench/contrib/extensions/common/extensionsInput';
+-import product from 'vs/platform/product/node/product';
++// import product from 'vs/platform/product/node/product';
++import { IProductService } from 'vs/platform/product/common/product';
+ import { ILogService } from 'vs/platform/log/common/log';
+ import { IProgressService, ProgressLocation } from 'vs/platform/progress/common/progress';
+ import { INotificationService } from 'vs/platform/notification/common/notification';
+@@ -53,7 +54,8 @@ class Extension implements IExtension {
+ 		public gallery: IGalleryExtension | undefined,
+ 		private telemetryService: ITelemetryService,
+ 		private logService: ILogService,
+-		private fileService: IFileService
++		private fileService: IFileService,
++		private productService: IProductService
+ 	) { }
+ 
+ 	get type(): ExtensionType | undefined {
+@@ -112,11 +114,11 @@ class Extension implements IExtension {
+ 	}
+ 
+ 	get url(): string | undefined {
+-		if (!product.extensionsGallery || !this.gallery) {
++		if (!this.productService.extensionsGallery || !this.gallery) {
+ 			return undefined;
+ 		}
+ 
+-		return `${product.extensionsGallery.itemUrl}?itemName=${this.publisher}.${this.name}`;
++		return `${this.productService.extensionsGallery.itemUrl}?itemName=${this.publisher}.${this.name}`;
+ 	}
+ 
+ 	get iconUrl(): string {
+@@ -183,7 +185,7 @@ class Extension implements IExtension {
+ 	}
+ 
+ 	get outdated(): boolean {
+-		return !!this.gallery && this.type === ExtensionType.User && semver.gt(this.latestVersion, this.version);
++		return !!this.gallery && this.type === ExtensionType.User && this.latestVersion !== this.version;
+ 	}
+ 
+ 	get telemetryData(): any {
+@@ -201,7 +203,7 @@ class Extension implements IExtension {
+ 	}
+ 
+ 	private isGalleryOutdated(): boolean {
+-		return this.local && this.gallery ? semver.gt(this.local.manifest.version, this.gallery.version) : false;
++		return this.local && this.gallery ? this.local.manifest.version !== this.gallery.version : false;
+ 	}
+ 
+ 	getManifest(token: CancellationToken): Promise<IExtensionManifest | null> {
+@@ -320,7 +322,8 @@ class Extensions extends Disposable {
+ 		@ITelemetryService private readonly telemetryService: ITelemetryService,
+ 		@ILogService private readonly logService: ILogService,
+ 		@IFileService private readonly fileService: IFileService,
+-		@IExtensionEnablementService private readonly extensionEnablementService: IExtensionEnablementService
++		@IExtensionEnablementService private readonly extensionEnablementService: IExtensionEnablementService,
++		@IProductService private readonly productService: IProductService
+ 	) {
+ 		super();
+ 		this._register(server.extensionManagementService.onInstallExtension(e => this.onInstallExtension(e)));
+@@ -342,7 +345,7 @@ class Extensions extends Disposable {
+ 		const installed = await this.server.extensionManagementService.getInstalled();
+ 		const byId = index(this.installed, e => e.local ? e.local.identifier.id : e.identifier.id);
+ 		this.installed = installed.map(local => {
+-			const extension = byId[local.identifier.id] || new Extension(this.galleryService, this.stateProvider, this.server, local, undefined, this.telemetryService, this.logService, this.fileService);
++			const extension = byId[local.identifier.id] || new Extension(this.galleryService, this.stateProvider, this.server, local, undefined, this.telemetryService, this.logService, this.fileService, this.productService);
+ 			extension.local = local;
+ 			extension.enablementState = this.extensionEnablementService.getEnablementState(local);
+ 			return extension;
+@@ -395,7 +398,7 @@ class Extensions extends Disposable {
+ 		const { gallery } = event;
+ 		if (gallery) {
+ 			const extension = this.installed.filter(e => areSameExtensions(e.identifier, gallery.identifier))[0]
+-				|| new Extension(this.galleryService, this.stateProvider, this.server, undefined, gallery, this.telemetryService, this.logService, this.fileService);
++				|| new Extension(this.galleryService, this.stateProvider, this.server, undefined, gallery, this.telemetryService, this.logService, this.fileService, this.productService);
+ 			this.installing.push(extension);
+ 			this._onChange.fire(extension);
+ 		}
+@@ -406,7 +409,7 @@ class Extensions extends Disposable {
+ 		const installingExtension = gallery ? this.installing.filter(e => areSameExtensions(e.identifier, gallery.identifier))[0] : null;
+ 		this.installing = installingExtension ? this.installing.filter(e => e !== installingExtension) : this.installing;
+ 
+-		let extension: Extension | undefined = installingExtension ? installingExtension : zipPath ? new Extension(this.galleryService, this.stateProvider, this.server, local, undefined, this.telemetryService, this.logService, this.fileService) : undefined;
++		let extension: Extension | undefined = installingExtension ? installingExtension : zipPath ? new Extension(this.galleryService, this.stateProvider, this.server, local, undefined, this.telemetryService, this.logService, this.fileService, this.productService) : undefined;
+ 		if (extension) {
+ 			if (local) {
+ 				const installed = this.installed.filter(e => areSameExtensions(e.identifier, extension!.identifier))[0];
+@@ -501,7 +504,8 @@ export class ExtensionsWorkbenchService extends Disposable implements IExtension
+ 		@IExtensionManagementServerService private readonly extensionManagementServerService: IExtensionManagementServerService,
+ 		@IStorageService private readonly storageService: IStorageService,
+ 		@IFileService private readonly fileService: IFileService,
+-		@IModeService private readonly modeService: IModeService
++		@IModeService private readonly modeService: IModeService,
++		@IProductService private readonly productService: IProductService
+ 	) {
+ 		super();
+ 		this.localExtensions = this._register(instantiationService.createInstance(Extensions, extensionManagementServerService.localExtensionManagementServer, ext => this.getExtensionState(ext)));
+@@ -606,7 +610,7 @@ export class ExtensionsWorkbenchService extends Disposable implements IExtension
+ 			text = text.replace(extensionRegex, (m, ext) => {
+ 
+ 				// Get curated keywords
+-				const lookup = product.extensionKeywords || {};
++				const lookup: {[extension: string]: string[]} = /*this.productService.extensionKeywords || */{};
+ 				const keywords = lookup[ext] || [];
+ 
+ 				// Get mode name
+@@ -649,7 +653,7 @@ export class ExtensionsWorkbenchService extends Disposable implements IExtension
+ 		if (installed) {
+ 			return installed;
+ 		}
+-		const extension = new Extension(this.galleryService, ext => this.getExtensionState(ext), undefined, undefined, gallery, this.telemetryService, this.logService, this.fileService);
++		const extension = new Extension(this.galleryService, ext => this.getExtensionState(ext), undefined, undefined, gallery, this.telemetryService, this.logService, this.fileService, this.productService);
+ 		if (maliciousExtensionSet.has(extension.identifier.id)) {
+ 			extension.isMalicious = true;
+ 		}
+@@ -999,7 +1003,7 @@ export class ExtensionsWorkbenchService extends Disposable implements IExtension
+ 
+ 	get allowedBadgeProviders(): string[] {
+ 		if (!this._extensionAllowedBadgeProviders) {
+-			this._extensionAllowedBadgeProviders = (product.extensionAllowedBadgeProviders || []).map(s => s.toLowerCase());
++			this._extensionAllowedBadgeProviders = []; // (product.extensionAllowedBadgeProviders || []).map(s => s.toLowerCase());
+ 		}
+ 		return this._extensionAllowedBadgeProviders;
+ 	}
+diff --git a/src/vs/workbench/services/extensions/electron-browser/extensionManagementServerService.ts b/src/vs/workbench/services/extensions/electron-browser/extensionManagementServerService.ts
+index 611ab9aec9..4e4bea89be 100644
+--- a/src/vs/workbench/services/extensions/electron-browser/extensionManagementServerService.ts
++++ b/src/vs/workbench/services/extensions/electron-browser/extensionManagementServerService.ts
+@@ -6,15 +6,15 @@
+ import { localize } from 'vs/nls';
+ import { Schemas } from 'vs/base/common/network';
+ import { URI } from 'vs/base/common/uri';
+-import { IExtensionManagementServer, IExtensionManagementServerService, IExtensionGalleryService } from 'vs/platform/extensionManagement/common/extensionManagement';
+-import { ExtensionManagementChannelClient } from 'vs/platform/extensionManagement/node/extensionManagementIpc';
++import { IExtensionManagementServer, IExtensionManagementServerService, IExtensionGalleryService, IExtensionManagementService } from 'vs/platform/extensionManagement/common/extensionManagement';
++// import { ExtensionManagementChannelClient } from 'vs/platform/extensionManagement/node/extensionManagementIpc';
+ import { IRemoteAgentService } from 'vs/workbench/services/remote/common/remoteAgentService';
+ import { REMOTE_HOST_SCHEME } from 'vs/platform/remote/common/remoteHosts';
+-import { IChannel } from 'vs/base/parts/ipc/common/ipc';
+-import { ISharedProcessService } from 'vs/platform/ipc/electron-browser/sharedProcessService';
++// import { IChannel } from 'vs/base/parts/ipc/common/ipc';
++// import { ISharedProcessService } from 'vs/platform/ipc/electron-browser/sharedProcessService';
+ import { registerSingleton } from 'vs/platform/instantiation/common/extensions';
+ import { ILogService } from 'vs/platform/log/common/log';
+-import { RemoteExtensionManagementChannelClient } from 'vs/workbench/services/extensions/electron-browser/remoteExtensionManagementIpc';
++// import { RemoteExtensionManagementChannelClient } from 'vs/workbench/services/extensions/electron-browser/remoteExtensionManagementIpc';
+ import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
+ import { IProductService } from 'vs/platform/product/common/product';
+ 
+@@ -28,24 +28,28 @@ export class ExtensionManagementServerService implements IExtensionManagementSer
+ 	readonly remoteExtensionManagementServer: IExtensionManagementServer | null = null;
+ 
+ 	constructor(
+-		@ISharedProcessService sharedProcessService: ISharedProcessService,
++		// Replacing the shared process and setting to any so we don't get
++		// compilation errors from the tests.
++		@IExtensionManagementService localExtensionManagementService: any,
++		// @ISharedProcessService sharedProcessService: ISharedProcessService,
+ 		@IRemoteAgentService remoteAgentService: IRemoteAgentService,
+ 		@IExtensionGalleryService galleryService: IExtensionGalleryService,
+ 		@IConfigurationService configurationService: IConfigurationService,
+ 		@IProductService productService: IProductService,
+-		@ILogService logService: ILogService
++		@ILogService logService: ILogService,
+ 	) {
+-		const localExtensionManagementService = new ExtensionManagementChannelClient(sharedProcessService.getChannel('extensions'));
+-
+-		this.localExtensionManagementServer = { extensionManagementService: localExtensionManagementService, authority: localExtensionManagementServerAuthority, label: localize('local', "Local") };
+-		const remoteAgentConnection = remoteAgentService.getConnection();
+-		if (remoteAgentConnection) {
+-			const extensionManagementService = new RemoteExtensionManagementChannelClient(remoteAgentConnection.getChannel<IChannel>('extensions'), this.localExtensionManagementServer.extensionManagementService, galleryService, logService, configurationService, productService);
+-			this.remoteExtensionManagementServer = { authority: remoteAgentConnection.remoteAuthority, extensionManagementService, label: localize('remote', "Remote") };
+-		}
++		// const localExtensionManagementService = new ExtensionManagementChannelClient(sharedProcessService.getChannel('extensions'));
++
++		this.localExtensionManagementServer = { extensionManagementService: localExtensionManagementService!, authority: localExtensionManagementServerAuthority, label: localize('remote', "Remote") };
++		// const remoteAgentConnection = remoteAgentService.getConnection();
++		// if (remoteAgentConnection) {
++		// 	const extensionManagementService = new RemoteExtensionManagementChannelClient(remoteAgentConnection.getChannel<IChannel>('extensions'), this.localExtensionManagementServer.extensionManagementService, galleryService, logService, configurationService, productService);
++		// 	this.remoteExtensionManagementServer = { authority: remoteAgentConnection.remoteAuthority, extensionManagementService, label: localize('remote', "Remote") };
++		// }
+ 	}
+ 
+ 	getExtensionManagementServer(location: URI): IExtensionManagementServer | null {
++		return this.localExtensionManagementServer;
+ 		if (location.scheme === Schemas.file) {
+ 			return this.localExtensionManagementServer;
+ 		}
+@@ -56,4 +60,4 @@ export class ExtensionManagementServerService implements IExtensionManagementSer
+ 	}
+ }
+ 
+-registerSingleton(IExtensionManagementServerService, ExtensionManagementServerService);
+\ No newline at end of file
++registerSingleton(IExtensionManagementServerService, ExtensionManagementServerService);
+diff --git a/src/vs/workbench/workbench.web.main.ts b/src/vs/workbench/workbench.web.main.ts
+index c28adc0ad9..4517c308da 100644
+--- a/src/vs/workbench/workbench.web.main.ts
++++ b/src/vs/workbench/workbench.web.main.ts
+@@ -128,7 +128,7 @@ import 'vs/workbench/services/extensions/browser/extensionService';
+ // import 'vs/workbench/services/contextmenu/electron-browser/contextmenuService';
+ // import 'vs/workbench/services/extensions/node/multiExtensionManagement';
+ import 'vs/workbench/services/label/common/labelService';
+-// import 'vs/workbench/services/extensions/electron-browser/extensionManagementServerService';
++import 'vs/workbench/services/extensions/electron-browser/extensionManagementServerService';
+ // import 'vs/workbench/services/remote/electron-browser/remoteAgentServiceImpl';
+ import 'vs/workbench/services/notification/common/notificationService';
+ // import 'vs/workbench/services/window/electron-browser/windowService';
+@@ -260,9 +260,9 @@ registerSingleton(IWebviewService, WebviewService, true);
+ registerSingleton(IWebviewEditorService, WebviewEditorService, true);
+ 
+ // Extensions Management
+-// import 'vs/workbench/contrib/extensions/electron-browser/extensions.contribution';
+-// import 'vs/workbench/contrib/extensions/browser/extensionsQuickOpen';
+-// import 'vs/workbench/contrib/extensions/electron-browser/extensionsViewlet';
++import 'vs/workbench/contrib/extensions/electron-browser/extensions.contribution';
++import 'vs/workbench/contrib/extensions/browser/extensionsQuickOpen';
++import 'vs/workbench/contrib/extensions/electron-browser/extensionsViewlet';
+ 
+ // Output Panel
+ import 'vs/workbench/contrib/output/browser/output.contribution';
